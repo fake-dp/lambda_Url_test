@@ -1,0 +1,115 @@
+name: Deploy to Lambda
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # 수동 실행 허용
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # ── 의존성 설치 ──────────────────────────────────────────
+      - name: Install dependencies
+        run: npm install --frozen-lockfile
+
+      # ── 빌드 ─────────────────────────────────────────────────
+      - name: Build
+        run: npm run build
+
+      # ── 배포 패키지 생성 ──────────────────────────────────────
+      # node_modules 에서 devDependencies 제외 후 zip 으로 묶는다.
+      # 패키지 크기 절감이 핵심: Lambda 직접 업로드 한도는 50MB(zip)
+      - name: Create deployment package
+        run: |
+          echo "📦 배포 패키지 생성 중..."
+
+          # production 의존성만 재설치
+          npm install --omit=dev --frozen-lockfile
+
+          # zip 생성 (dist + node_modules)
+          zip -r deploy.zip dist/ node_modules/ --quiet
+
+          echo "✅ 패키지 생성 완료"
+          echo "📏 패키지 크기: $(du -sh deploy.zip | cut -f1)"
+
+      # ── AWS 인증 설정 ─────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-northeast-2' }}
+
+      # ── Lambda 코드 업데이트 ──────────────────────────────────
+      # zip 파일이 50MB 초과 시 S3 경유 방식으로 변경 필요
+      - name: Update Lambda function code
+        run: |
+          echo "🚀 Lambda 함수 코드 업데이트 중..."
+
+          aws lambda update-function-code \
+            --function-name ${{ vars.LAMBDA_FUNCTION_NAME }} \
+            --zip-file fileb://deploy.zip
+
+          echo "✅ Lambda 코드 업데이트 완료"
+
+      # ── Lambda 초기화 완료 대기 ───────────────────────────────
+      # update-function-code 직후 바로 invoke 하면 실패할 수 있어서 대기
+      - name: Wait for Lambda update
+        run: |
+          echo "⏳ Lambda 업데이트 완료 대기 중..."
+          aws lambda wait function-updated \
+            --function-name ${{ vars.LAMBDA_FUNCTION_NAME }}
+          echo "✅ Lambda 업데이트 완료"
+
+      # ── Lambda 환경 변수 업데이트 ─────────────────────────────
+      # 환경 변수가 변경된 경우에만 이 스텝을 활성화하면 된다.
+      # 최초 배포 이후에는 보통 주석 처리해도 된다.
+      - name: Update Lambda environment variables
+        run: |
+          echo "🔧 Lambda 환경 변수 업데이트 중..."
+
+          aws lambda update-function-configuration \
+            --function-name ${{ vars.LAMBDA_FUNCTION_NAME }} \
+            --environment "Variables={
+              NODE_ENV=production,
+              APP_NAME=nestjs-lambda-practice,
+              CORS_ORIGIN=${{ vars.CORS_ORIGIN }}
+            }"
+
+          echo "✅ 환경 변수 업데이트 완료"
+
+      # ── 배포 확인 (Health Check) ──────────────────────────────
+      - name: Health check
+        run: |
+          echo "🔍 Health Check 중..."
+          sleep 5  # 환경 변수 반영 대기
+
+          FUNCTION_URL="${{ vars.LAMBDA_FUNCTION_URL }}"
+          HEALTH_URL="${FUNCTION_URL%/}/health"
+
+          echo "요청 URL: $HEALTH_URL"
+
+          RESPONSE=$(curl -sf "$HEALTH_URL" 2>&1)
+          if [ $? -eq 0 ]; then
+            echo "✅ 배포 성공!"
+            echo "응답: $RESPONSE"
+          else
+            echo "❌ Health check 실패"
+            echo "오류: $RESPONSE"
+            exit 1
+          fi
+
+      # ── 정리 ─────────────────────────────────────────────────
+      - name: Cleanup
+        if: always()
+        run: rm -f deploy.zip

@@ -1,0 +1,27 @@
+{
+  "name": "nestjs-lambda-practice",
+  "version": "0.0.1",
+  "description": "NestJS + Lambda Function URL 실습 프로젝트",
+  "private": true,
+  "scripts": {
+    "build": "nest build",
+    "start:dev": "nest start --watch",
+    "start": "node dist/main"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.1",
+    "@nestjs/core": "^11.0.1",
+    "@nestjs/platform-express": "^11.0.1",
+    "@vendia/serverless-express": "^4.12.6",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@types/aws-lambda": "^8.10.149",
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.3"
+  }
+}
