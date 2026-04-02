@@ -1,49 +1,88 @@
 /**
- * Lambda Function URL 전용 진입점
+ * Lambda Function URL 전용 진입점 (Node.js 24 호환)
  *
- * 동작 원리:
- * 1. Lambda가 최초 실행될 때 NestJS 앱을 초기화 (콜드 스타트)
- * 2. 초기화된 앱을 serverless-express로 래핑
- * 3. 이후 모든 요청은 핸들러(handler)를 통해 처리
- * 4. Lambda 컨테이너가 살아있는 동안은 앱 재초기화 없이 재사용 (웜 스타트)
+ * Node.js 24부터 callback 방식이 제거되어 async/await 방식으로 구현.
+ * @vendia/serverless-express 대신 직접 express 앱을 호출하는 방식 사용.
  */
 import { NestFactory } from '@nestjs/core';
 import { ExpressAdapter } from '@nestjs/platform-express';
-import serverlessExpress from '@vendia/serverless-express';
-import { Context, Handler } from 'aws-lambda';
-import express from 'express';
+import { Context } from 'aws-lambda';
+import express, { Express } from 'express';
+import { IncomingMessage, ServerResponse } from 'http';
 import { AppModule } from './app.module';
 
-// 웜 스타트 최적화: 컨테이너가 살아있는 동안 재사용
-let cachedHandler: Handler;
+let cachedApp: Express;
 
-async function bootstrapLambda(): Promise<Handler> {
+async function bootstrapLambda(): Promise<Express> {
   const expressApp = express();
   const adapter = new ExpressAdapter(expressApp);
 
   const app = await NestFactory.create(AppModule, adapter);
 
-  // CORS 설정 (Function URL 직접 호출 또는 CloudFront 경유 모두 허용)
   app.enableCors({
     origin: process.env.CORS_ORIGIN ?? '*',
     credentials: true,
   });
 
   await app.init();
-
-  // NestJS 앱을 Lambda 이벤트 핸들러로 변환
-  return serverlessExpress({ app: expressApp });
+  return expressApp;
 }
 
-export const handler = async (event: any, context: Context, callback: any) => {
-  // 콜드 스타트: 아직 핸들러가 없으면 초기화
-  if (!cachedHandler) {
+function forwardRequestToExpress(
+  expressApp: Express,
+  event: any,
+): Promise<any> {
+  return new Promise((resolve) => {
+    // Function URL 이벤트를 express req/res 형태로 변환
+    const method = event.requestContext?.http?.method ?? 'GET';
+    const path = event.rawPath ?? '/';
+    const query = event.rawQueryString ? `?${event.rawQueryString}` : '';
+    const headers = event.headers ?? {};
+    const body = event.body
+      ? event.isBase64Encoded
+        ? Buffer.from(event.body, 'base64').toString('utf8')
+        : event.body
+      : undefined;
+
+    const req = Object.assign(new IncomingMessage(null as any), {
+      method,
+      url: `${path}${query}`,
+      headers,
+    }) as any;
+
+    if (body) {
+      req.push(body);
+      req.push(null);
+    } else {
+      req.push(null);
+    }
+
+    const chunks: Buffer[] = [];
+    const res = Object.assign(new ServerResponse(req), {
+      write: (chunk: any) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)),
+      end: (chunk?: any) => {
+        if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        const responseBody = Buffer.concat(chunks).toString('utf8');
+        resolve({
+          statusCode: (res as any).statusCode ?? 200,
+          headers: (res as any).getHeaders?.() ?? {},
+          body: responseBody,
+        });
+      },
+    }) as any;
+
+    expressApp(req, res);
+  });
+}
+
+export const handler = async (event: any, context: Context) => {
+  if (!cachedApp) {
     console.log('[Lambda] 콜드 스타트 - NestJS 앱 초기화 중...');
-    cachedHandler = await bootstrapLambda();
+    cachedApp = await bootstrapLambda();
     console.log('[Lambda] NestJS 앱 초기화 완료');
   } else {
     console.log('[Lambda] 웜 스타트 - 기존 앱 재사용');
   }
 
-  return cachedHandler(event, context, callback);
+  return forwardRequestToExpress(cachedApp, event);
 };
