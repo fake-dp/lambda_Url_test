@@ -5,8 +5,8 @@
  */
 import { NestFactory } from '@nestjs/core';
 import { ExpressAdapter } from '@nestjs/platform-express';
-import express from 'express';
-import serverlessHttp from 'serverless-http';
+import * as express from 'express';
+import serverlessHttp = require('serverless-http');
 import { AppModule } from './app.module';
 
 let cachedHandler: ReturnType<typeof serverlessHttp>;
